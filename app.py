@@ -19,6 +19,7 @@ try:
 except Exception:
     pass
 
+# Auto-detect device (Cloud uses CPU, Mac uses MPS)
 DEVICE = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 IMG_SIZE = (512, 512)
@@ -104,30 +105,51 @@ def load_models():
         return UNet(spatial_dims=2, in_channels=1, out_channels=1,
                     channels=(16, 32, 64, 128, 256), strides=(2, 2, 2, 2), num_res_units=2).to(DEVICE)
     res, pix = get_unet(), get_unet()
+    
+    # Only load weights if files exist (prevents crash on fresh GitHub clone)
     if os.path.exists(RESUNET_PATH): 
         res.load_state_dict(torch.load(RESUNET_PATH, map_location=DEVICE, weights_only=False))
     if os.path.exists(PIX2PIX_PATH): 
         pix.load_state_dict(torch.load(PIX2PIX_PATH, map_location=DEVICE, weights_only=False))
+    
     res.eval(); pix.eval()
     return res, pix
 
 def run_inference(image_path, model):
-    transforms = Compose([LoadImaged(keys=["image"]), EnsureChannelFirstd(keys=["image"]),
-                          Lambdad(keys=["image"], func=lambda x: x[0:1, :, :] if x.shape[0] > 1 else x),
-                          ScaleIntensityd(keys=["image"]), ResizeD(keys=["image"], spatial_size=IMG_SIZE), EnsureTyped(keys=["image"])])
+    transforms = Compose([
+        LoadImaged(keys=["image"]), 
+        EnsureChannelFirstd(keys=["image"]),
+        Lambdad(keys=["image"], func=lambda x: x[0:1, :, :] if x.shape[0] > 1 else x),
+        ScaleIntensityd(keys=["image"]), 
+        ResizeD(keys=["image"], spatial_size=IMG_SIZE), 
+        EnsureTyped(keys=["image"])
+    ])
     data = transforms({"image": image_path})
     input_tensor = data["image"].unsqueeze(0).to(DEVICE)
-    with torch.no_grad(): out = model(input_tensor)
+    with torch.no_grad(): 
+        out = model(input_tensor)
     return out.cpu().numpy()[0, 0, :, :]
 
-# --- 5. SIDEBAR ---
+# --- 5. SIDEBAR (DIRECTORY SAFETY INTEGRATED) ---
 with st.sidebar:
-    st.header(" Clinician Profile")
+    st.header("⚙️ Clinician Profile")
     st.session_state.dr_name = st.text_input("Lead Radiologist", value=st.session_state.dr_name)
     st.divider()
-    img_dir, mask_dir = os.path.join(BASE_DIR, "data", "cxr"), os.path.join(BASE_DIR, "data", "masks")
+
+    img_dir = os.path.join(BASE_DIR, "data", "cxr")
+    mask_dir = os.path.join(BASE_DIR, "data", "masks")
+    
+    # Create directories if they don't exist
+    os.makedirs(img_dir, exist_ok=True)
+    os.makedirs(mask_dir, exist_ok=True)
+    os.makedirs(os.path.join(BASE_DIR, "models"), exist_ok=True)
+
     files = sorted([f for f in os.listdir(img_dir) if f.endswith(('.png', '.jpg', '.jpeg'))])
-    if files:
+    
+    if not files:
+        st.warning("⚠️ No clinical data found in `/data/cxr/`. Please upload images to GitHub to begin analysis.")
+        img_path, gt_path = None, None
+    else:
         selected = st.selectbox("Current Study ID", files)
         img_path, gt_path = os.path.join(img_dir, selected), os.path.join(mask_dir, selected)
 
@@ -136,14 +158,18 @@ st.title("🩻 Clinical Bone Suppression Dashboard")
 st.write(f"Authorized Clinician: **{st.session_state.dr_name}**")
 
 res_model, gan_model = load_models()
-tab_main, tab_history = st.tabs([" Active Analysis", " History Archive"])
+tab_main, tab_history = st.tabs(["⚡ Active Analysis", "📂 History Archive"])
 
 with tab_main:
-    if st.button("EXECUTE NEURAL PIPELINE", use_container_width=True):
+    # Disable button if no files are present
+    run_btn = st.button("EXECUTE NEURAL PIPELINE", use_container_width=True, disabled=(img_path is None))
+    
+    if run_btn:
         with st.status("Analyzing Patient Data...", expanded=False) as status:
             res_out = run_inference(img_path, res_model)
             gan_out = run_inference(img_path, gan_model)
             ldm_out = np.clip(gan_out + np.random.normal(0, 0.003, gan_out.shape), 0, 1)
+            
             gt_arr = np.array(Image.open(gt_path).convert("L").resize(IMG_SIZE)) / 255.0
             r_s, g_s, l_s = ssim(gt_arr, res_out, data_range=1.0), ssim(gt_arr, gan_out, data_range=1.0), ssim(gt_arr, ldm_out, data_range=1.0)
             
@@ -154,7 +180,7 @@ with tab_main:
             status.update(label="Analysis Complete", state="complete")
 
         # Visual Comparison Matrix
-        st.subheader("Clinical Viewing Station")
+        st.subheader("🖥️ Clinical Viewing Station")
         v_tab1, v_tab2 = st.tabs(["Multi-Model Output", "Anatomical Residuals"])
         
         with v_tab1:
@@ -168,7 +194,7 @@ with tab_main:
             best_arr = ldm_out if l_s > g_s else gan_out
             buf = io.BytesIO()
             Image.fromarray((best_arr * 255).astype(np.uint8)).save(buf, format="PNG")
-            st.download_button(f" Save Result to {st.session_state.dr_name}'s PACS", 
+            st.download_button(f"💾 Save Result to {st.session_state.dr_name}'s PACS", 
                                data=buf.getvalue(), file_name=f"clinical_{selected}", mime="image/png")
 
         with v_tab2:
@@ -198,7 +224,7 @@ with tab_main:
             if lottie_ai: st_lottie(lottie_ai, height=120, key="winner_anim")
 
 with tab_history:
-    st.subheader("Previous Analyses")
+    st.subheader("📜 Previous Analyses")
     history_data = get_history()
     if history_data:
         for entry in history_data:

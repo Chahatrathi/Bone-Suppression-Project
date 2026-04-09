@@ -2,10 +2,7 @@
 __pycache__/
 *.py[cod]
 
-# Data and Models (Too large for GitHub)
-data/
-models/
-*.pth
+
 
 analysis_history.json
 
