@@ -1,0 +1,8 @@
+torch
+monai
+streamlit
+streamlit-lottie
+numpy<2.0.0
+scikit-image
+Pillow
+requests
